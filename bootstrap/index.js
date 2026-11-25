@@ -11,6 +11,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dshHome, loadPolicy, savePolicy, decide, audit, markUsed, prune } from '../lib/policy.mjs'
 import { createRequest, waitDecision } from '../lib/approvals.mjs'
+import { ensureStateServer } from '../lib/state-server.mjs'
 
 export const name = 'dsh-aegis-bootstrap'
 export const inject = ['tools']
@@ -181,6 +182,7 @@ function startCell (ctx, descriptor) {
 export function apply (ctx, config = {}) {
   const cells = resolveCells(config)
   console.log('[aegis] bootstrap loaded (' + cells.length + ' cell(s))')
+  try { ensureStateServer() } catch (error) { console.error('[aegis] state server: ' + error.message) }
 
   const pruneAfterDays = Number(config.pruneAfterDays ?? 30)
   if (Number.isFinite(pruneAfterDays) && pruneAfterDays > 0) {
