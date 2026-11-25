@@ -17,6 +17,11 @@
   "bin": { "aegis": "./bin/aegis.mjs" },
   "files": ["bootstrap", "lib", "bin", "cordis.patch.yml", "README.md", "LICENSE"],
   "scripts": { "test": "node test/core.test.mjs" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZJ929-max/dsh-aegis.git"
+  },
+  "homepage": "https://github.com/ZJ929-max/dsh-aegis#readme",
   "engines": { "node": ">=22" },
   "license": "MIT"
 }
