@@ -1,50 +1,66 @@
 /**
- * dsh-aegis-bootstrap — Phase 2 prototype.
+ * dsh-aegis-bootstrap — Phase 2.
  *
- * Reads a cell descriptor, starts a zero-permission Cell child, registers proxy
- * tools in the DSH tool registry, and forwards invokes + capability requests.
- * The Cell never does real I/O: the Broker (this process) executes fs reads.
+ * Reads one or more Cell descriptors (config.cells, a cells.json file, or the
+ * legacy config.pluginPath), starts zero-permission Cell children, registers
+ * proxy tools, and forwards invokes + capability requests to the Broker.
  */
 import { fork } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadPolicy, savePolicy, decide, audit, markUsed, prune } from '../lib/policy.mjs'
+import { dshHome, loadPolicy, savePolicy, decide, audit, markUsed, prune } from '../lib/policy.mjs'
 import { createRequest, waitDecision } from '../lib/approvals.mjs'
 
 export const name = 'dsh-aegis-bootstrap'
 export const inject = ['tools']
 
 const here = path.dirname(fileURLToPath(import.meta.url))
+const active = new Set()
+process.once('exit', () => { for (const dispose of active) { try { dispose() } catch {} } })
 
-export function apply (ctx, config = {}) {
-  const pluginPath = config.pluginPath ?? process.env.AEGIS_PLUGIN
-  console.log('[aegis] bootstrap loaded (cell plugin=' + (pluginPath ?? 'none') + ')')
+function readCellsFile (file) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const rows = Array.isArray(parsed) ? parsed : parsed.cells
+    return Array.isArray(rows) ? rows : []
+  } catch { return [] }
+}
 
-  // Lifecycle: drop grants unused for N days whenever DSH starts. No scheduler,
-  // no service; the policy file is the only state.
-  const pruneAfterDays = Number(config.pruneAfterDays ?? 30)
-  if (Number.isFinite(pruneAfterDays) && pruneAfterDays > 0) {
-    const policy = loadPolicy()
-    const removed = prune(policy, { days: pruneAfterDays })
-    if (removed.length > 0) {
-      savePolicy(policy)
-      audit({ event: 'auto-prune', days: pruneAfterDays, removed })
-      console.log('[aegis] auto-pruned ' + removed.length + ' unused grant(s)')
-    }
+function resolveCells (config) {
+  if (Array.isArray(config.cells) && config.cells.length > 0) return config.cells
+  const file = config.cellsFile ?? path.join(dshHome(), 'aegis', 'cells.json')
+  if (fs.existsSync(file)) {
+    const rows = readCellsFile(file)
+    if (rows.length > 0) return rows
   }
-  if (!pluginPath) return
-  const pluginId = config.pluginId ?? 'unknown'
-  const selfTest = config.selfTest === true
+  const legacy = config.pluginPath ?? process.env.AEGIS_PLUGIN
+  return legacy ? [{ pluginPath: legacy, pluginId: config.pluginId ?? 'unknown', selfTest: config.selfTest === true }] : []
+}
+
+function resolvePluginPath (value) {
+  const raw = String(value ?? '')
+  if (!raw) return null
+  if (fs.existsSync(raw)) return path.resolve(raw)
+  return null
+}
+
+function startCell (ctx, descriptor) {
+  const pluginPath = resolvePluginPath(descriptor.pluginPath)
+  if (!pluginPath) {
+    console.error('[aegis] cell skipped: plugin path not found: ' + String(descriptor.pluginPath))
+    return null
+  }
+  const pluginId = String(descriptor.pluginId ?? descriptor.name ?? 'unknown')
+  const selfTest = descriptor.selfTest === true
   const cellEntry = path.join(here, 'cell-host.mjs')
-  const pluginDir = path.dirname(path.resolve(pluginPath))
+  const pluginDir = path.dirname(pluginPath)
   const allow = [here, pluginDir]
   try { allow.push(fs.realpathSync(pluginDir)) } catch {}
-  for (const extra of config.extraRead ?? []) {
+  for (const extra of descriptor.extraRead ?? []) {
     try { allow.push(fs.realpathSync(extra)) } catch { allow.push(extra) }
   }
 
-  // Minimal environment: no DEEPSEEK_API_KEY, no proxy tokens, no user secrets.
   const env = {
     AEGIS_PLUGIN: pluginId,
     PATH: process.env.PATH,
@@ -53,24 +69,26 @@ export function apply (ctx, config = {}) {
     TEMP: process.env.TEMP,
     TMP: process.env.TMP,
   }
-  const child = fork(cellEntry, [path.resolve(pluginPath)], {
+  const child = fork(cellEntry, [pluginPath], {
     execArgv: ['--permission', ...allow.map((d) => '--allow-fs-read=' + d)],
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     env,
   })
+  console.log('[aegis] cell started ' + pluginId + ' ← ' + pluginPath)
 
   const tools = new Map()
   const pending = new Map()
   const sessionGrants = new Set()
   let seq = 0
 
-  const dispose = () => { try { child.kill() } catch {} }
-  if (typeof ctx.effect === 'function') ctx.effect(() => () => dispose())
-  // Safety net for an abrupt DSH exit: the Cell is a child, never a service.
-  process.once('exit', dispose)
+  const dispose = () => {
+    active.delete(dispose)
+    try { child.kill() } catch {}
+  }
+  active.add(dispose)
 
   const invoke = (toolName, args) => {
-    console.log('[aegis] invoke ' + toolName)
+    console.log('[aegis] invoke ' + pluginId + '.' + toolName)
     return new Promise((resolve, reject) => {
       const id = ++seq
       pending.set(id, { resolve, reject })
@@ -81,21 +99,25 @@ export function apply (ctx, config = {}) {
   child.on('message', (msg) => {
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'register') {
-      console.log('[aegis] registered cell tool ' + msg.tool.name)
+      console.log('[aegis] registered ' + pluginId + '.' + msg.tool.name)
       tools.set(msg.tool.name, msg.tool)
-      ctx.tools.register({
-        name: msg.tool.name,
-        description: msg.tool.description ?? '',
-        parameters: msg.tool.parameters ?? { type: 'object', properties: {} },
-        output: {
-          schema: {},
-          render (_args, value) {
-            const text = typeof value === 'string' ? value : JSON.stringify(value)
-            return [{ type: 'text', text }]
+      try {
+        ctx.tools.register({
+          name: msg.tool.name,
+          description: msg.tool.description ?? '',
+          parameters: msg.tool.parameters ?? { type: 'object', properties: {} },
+          output: {
+            schema: {},
+            render (_args, value) {
+              const text = typeof value === 'string' ? value : JSON.stringify(value)
+              return [{ type: 'text', text }]
+            },
           },
-        },
-        execute: (args) => invoke(msg.tool.name, args),
-      })
+          execute: (args) => invoke(msg.tool.name, args),
+        })
+      } catch (error) {
+        console.error('[aegis] tool register failed ' + msg.tool.name + ': ' + error.message)
+      }
       if (selfTest && msg.tool.name === 'demo_echo') {
         setTimeout(() => {
           const def = ctx.tools.get?.('demo_echo')
@@ -124,7 +146,6 @@ export function apply (ctx, config = {}) {
           decision = d.allow ? 'allow' : 'deny'
           audit({ event: 'permission-decision', id: req.id, plugin: pluginId, cap: msg.cap, scope: msg.scope, decision, lifetime: d.lifetime, timedOut: Boolean(d.timedOut) })
           if (d.allow && d.lifetime === 'session') sessionGrants.add(key)
-          // lifetime 'always' is persisted by resolveRequest(); 'once' applies to this call only.
         }
         if (decision === 'allow' && (msg.cap === 'fs.read' || msg.cap === 'fs.write' || msg.cap === 'net')) {
           try {
@@ -153,4 +174,31 @@ export function apply (ctx, config = {}) {
       })
     }
   })
+
+  return dispose
+}
+
+export function apply (ctx, config = {}) {
+  const cells = resolveCells(config)
+  console.log('[aegis] bootstrap loaded (' + cells.length + ' cell(s))')
+
+  const pruneAfterDays = Number(config.pruneAfterDays ?? 30)
+  if (Number.isFinite(pruneAfterDays) && pruneAfterDays > 0) {
+    const policy = loadPolicy()
+    const removed = prune(policy, { days: pruneAfterDays })
+    if (removed.length > 0) {
+      savePolicy(policy)
+      audit({ event: 'auto-prune', days: pruneAfterDays, removed })
+      console.log('[aegis] auto-pruned ' + removed.length + ' unused grant(s)')
+    }
+  }
+
+  const disposers = []
+  for (const cell of cells) {
+    const dispose = startCell(ctx, cell)
+    if (dispose) disposers.push(dispose)
+  }
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => () => { for (const dispose of disposers) { try { dispose() } catch {} } })
+  }
 }
