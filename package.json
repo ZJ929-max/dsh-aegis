@@ -1,0 +1,22 @@
+{
+  "name": "dsh-aegis",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "DSH 插件权限模型补齐（Aegis）：加载门 + Native Cell + 运行时动态授权",
+  "exports": {
+    ".": "./bootstrap/index.js",
+    "./plugin": "./bootstrap/index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": ["./cordis.patch.yml"]
+    }
+  },
+  "bin": { "aegis": "./bin/aegis.mjs" },
+  "files": ["bootstrap", "lib", "bin", "cordis.patch.yml", "README.md", "LICENSE"],
+  "scripts": { "test": "node test/core.test.mjs" },
+  "engines": { "node": ">=22" },
+  "license": "MIT"
+}

@@ -1,0 +1,30 @@
+name: test
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: core
+        run: node test/core.test.mjs
+      - name: bootstrap
+        run: node test/bootstrap.test.mjs
+      - name: ui
+        run: node test/ui.test.mjs
+      - name: env
+        run: node test/env.test.mjs
+      - name: net
+        run: node test/net.test.mjs
+      - name: fetch
+        run: node test/fetch.test.mjs
+      - name: fs-async
+        run: node test/fs-async.test.mjs
+      - name: fs-write
+        run: node test/fs-write.test.mjs
+      - name: proc
+        run: node test/proc.test.mjs

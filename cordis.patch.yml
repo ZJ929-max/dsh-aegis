@@ -1,0 +1,3 @@
+- insert:
+    - id: aegis-bootstrap
+      name: dsh-aegis/plugin
