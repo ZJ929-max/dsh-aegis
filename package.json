@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": false,
   "type": "module",
-  "description": "DSH 插件权限模型补齐（Aegis）：加载门 + Native Cell + 运行时动态授权",
+  "description": "DSH plugin permission model: load gate + permissioned Native Cell + dynamic approvals. 权限审批页: http://127.0.0.1:47812/",
   "exports": {
     ".": "./bootstrap/index.js",
     "./plugin": "./bootstrap/index.js",
